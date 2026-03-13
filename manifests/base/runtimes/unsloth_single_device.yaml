@@ -1,0 +1,47 @@
+# ClusterTrainingRuntime for Unsloth-accelerated LLM fine-tuning.
+#
+# Unsloth provides ~2x training speedup and ~70% lower memory usage
+# by using custom CUDA kernels.  It is single-GPU only.
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: ClusterTrainingRuntime
+metadata:
+  name: unsloth-single-device
+  labels:
+    trainer.kubeflow.org/framework: torch
+    trainer.kubeflow.org/llm-backend: unsloth
+spec:
+  numNodes: 1
+  template:
+    spec:
+      replicatedJobs:
+        - name: node
+          template:
+            spec:
+              template:
+                spec:
+                  containers:
+                    - name: trainer
+                      image: ghcr.io/kubeflow/trainer/unsloth-trainer:latest
+                      env:
+                        - name: KUBEFLOW_MODEL_PATH
+                          value: /mnt/model
+                        - name: KUBEFLOW_DATASET_PATH
+                          value: /mnt/dataset
+                      resources:
+                        limits:
+                          nvidia.com/gpu: "1"
+                      volumeMounts:
+                        - name: model-volume
+                          mountPath: /mnt/model
+                        - name: dataset-volume
+                          mountPath: /mnt/dataset
+                        - name: output-volume
+                          mountPath: /mnt/output
+                  volumes:
+                    - name: model-volume
+                      persistentVolumeClaim:
+                        claimName: "$(RUNTIME_NAME)"
+                    - name: dataset-volume
+                      emptyDir: {}
+                    - name: output-volume
+                      emptyDir: {}

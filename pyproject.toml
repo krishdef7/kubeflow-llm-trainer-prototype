@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kubeflow-dynamic-llm-trainer"
+version = "0.1.0"
+description = "GSoC 2026 Prototype: Dynamic LLM Trainer Framework for Kubeflow"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Krish", email = "krishdef7@gmail.com"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[project.entry-points."kubeflow.llm_backends"]
+torchtune = "kubeflow_llm_trainer.backends.torchtune:TorchTuneBackend"
+trl = "kubeflow_llm_trainer.backends.trl:TRLBackend"
+unsloth = "kubeflow_llm_trainer.backends.unsloth:UnslothBackend"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
