@@ -2,8 +2,6 @@
 
 **GSoC 2026 Prototype** — [KEP-2839](https://github.com/kubeflow/trainer/issues/2839) · Contributor: [@krishdef7](https://github.com/krishdef7)
 
-**Mentors:** [@tariq-hasan](https://github.com/tariq-hasan), [@andreyvelich](https://github.com/andreyvelich)
-
 ---
 
 ## Problem
