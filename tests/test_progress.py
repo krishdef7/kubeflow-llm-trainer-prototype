@@ -254,3 +254,75 @@ class TestKubeflowTrainerCallback:
 
         body = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
         assert body["trainerStatus"]["progress"] == 100
+
+    @patch("kubeflow_llm_trainer.progress.urlopen")
+    def test_on_log_eta_none_at_step_zero(self, mock_urlopen, monkeypatch):
+        """ETA should be None (omitted from payload) when step=0."""
+        monkeypatch.setenv(ENV_STATUS_URL, "https://controller:8443/status")
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        callback = KubeflowTrainerCallback()
+        callback._start_time = 1000.0  # set but step=0
+        state = MagicMock()
+        state.global_step = 0
+        state.max_steps = 100
+
+        callback.on_log(args=None, state=state, control=None, logs={"loss": 1.0})
+
+        body = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        # eta should not be in payload when not computable
+        assert "eta" not in body["trainerStatus"]
+
+    @patch("kubeflow_llm_trainer.progress.urlopen")
+    @patch("kubeflow_llm_trainer.progress.time")
+    def test_on_log_eta_hours_format(self, mock_time, mock_urlopen, monkeypatch):
+        """ETA >= 3600s should format as 'Xh Ym'."""
+        monkeypatch.setenv(ENV_STATUS_URL, "https://controller:8443/status")
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        callback = KubeflowTrainerCallback()
+        callback._start_time = 1.0
+        # 10 steps done in 10 seconds, 9990 remaining → ~9990s ETA
+        mock_time.time.return_value = 11.0
+        state = MagicMock()
+        state.global_step = 10
+        state.max_steps = 10000
+
+        callback.on_log(args=None, state=state, control=None, logs={})
+
+        body = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        eta = body["trainerStatus"]["eta"]
+        assert "h" in eta and "m" in eta
+
+    @patch("kubeflow_llm_trainer.progress.urlopen")
+    @patch("kubeflow_llm_trainer.progress.time")
+    def test_on_log_eta_seconds_format(self, mock_time, mock_urlopen, monkeypatch):
+        """ETA < 60s should format as 'Xs'."""
+        monkeypatch.setenv(ENV_STATUS_URL, "https://controller:8443/status")
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_response
+
+        callback = KubeflowTrainerCallback()
+        callback._start_time = 1.0
+        # 90 steps done in 90s, 10 remaining → ~10s ETA
+        mock_time.time.return_value = 91.0
+        state = MagicMock()
+        state.global_step = 90
+        state.max_steps = 100
+
+        callback.on_log(args=None, state=state, control=None, logs={})
+
+        body = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        eta = body["trainerStatus"]["eta"]
+        assert eta.endswith("s") and "m" not in eta

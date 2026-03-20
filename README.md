@@ -2,6 +2,8 @@
 
 **GSoC 2026 Prototype** — [KEP-2839](https://github.com/kubeflow/trainer/issues/2839) · Contributor: [@krishdef7](https://github.com/krishdef7)
 
+**Mentors:** [@tariq-hasan](https://github.com/tariq-hasan), [@andreyvelich](https://github.com/andreyvelich)
+
 ---
 
 ## Problem
@@ -168,7 +170,7 @@ manifests/base/runtimes/
 ├── trl_distributed.yaml       # ClusterTrainingRuntime for TRL
 └── unsloth_single_device.yaml # ClusterTrainingRuntime for Unsloth
 
-tests/                    # 119 tests covering all paths
+tests/                    # 136 tests covering all paths
 examples/                 # 4 runnable examples
 ```
 
@@ -178,7 +180,7 @@ examples/                 # 4 runnable examples
 # Install
 pip install -e ".[dev]"
 
-# Run tests (114 passing)
+# Run tests (136 passing)
 pytest tests/ -v
 
 # Run examples

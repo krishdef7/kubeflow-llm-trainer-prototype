@@ -59,39 +59,50 @@ def _build_callbacks() -> list:
     return callbacks
 
 
-def _load_dataset(dataset_name: str | None):
+def _load_dataset(dataset_name: str | None, split: str = "train"):
     """Load a dataset from HuggingFace Hub or local path.
 
     TRL trainers expect a ``datasets.Dataset`` object, not a string path.
-    This function handles the conversion.
+
+    Args:
+        dataset_name: HuggingFace Hub ID or local directory path.
+        split: Dataset split to load.  Falls back to first available split
+            if the requested one doesn't exist.
     """
     if dataset_name is None:
         return None
     from datasets import load_dataset  # type: ignore[import-untyped]
-    # If it's a local directory, load from disk. Otherwise treat as a
-    # HuggingFace Hub dataset identifier.
+
     if os.path.isdir(dataset_name):
-        return load_dataset("json", data_dir=dataset_name, split="train")
-    return load_dataset(dataset_name, split="train")
+        return load_dataset("json", data_dir=dataset_name, split=split)
+
+    try:
+        return load_dataset(dataset_name, split=split)
+    except (ValueError, KeyError):
+        # The requested split doesn't exist (common for DPO preference
+        # datasets which use "train_prefs", etc.).  Load the full dataset
+        # and use its first split.
+        ds = load_dataset(dataset_name)
+        first_split = next(iter(ds))
+        print(f"Split {split!r} not found, using {first_split!r} instead.")
+        return ds[first_split]
 
 
-def _build_peft_config(training_args: dict[str, Any]):
-    """Extract PEFT args from training_args and build a PeftConfig.
+def _build_peft_config(training_args: dict[str, Any]) -> tuple[Any, Any]:
+    """Extract PEFT/BNB args and build LoraConfig + BitsAndBytesConfig.
 
-    TRL's _build_peft_args() in trl.py generates keys like ``use_peft``,
-    ``lora_r``, ``lora_alpha``, etc.  These are NOT fields on TRL's Config
-    classes — they need to be extracted and converted into a ``LoraConfig``
-    object that gets passed to the trainer constructor separately.
-
-    Returns ``None`` if PEFT is not requested.
+    Returns:
+        A tuple of ``(peft_config, quantization_config)`` where either may
+        be ``None``.  The ``peft_config`` is passed to the TRL trainer's
+        ``peft_config=`` parameter.  The ``quantization_config`` is passed
+        to ``AutoModelForCausalLM.from_pretrained()`` for QLoRA 4-bit loading.
     """
     if not training_args.pop("use_peft", False):
-        return None
+        return None, None
 
     from peft import LoraConfig  # type: ignore[import-untyped]
 
     lora_kwargs: dict[str, Any] = {}
-    # Map our flat keys to LoraConfig constructor args.
     key_map = {
         "lora_r": "r",
         "lora_alpha": "lora_alpha",
@@ -103,12 +114,52 @@ def _build_peft_config(training_args: dict[str, Any]):
         if value is not None:
             lora_kwargs[peft_key] = value
 
-    # BitsAndBytes quantization config for QLoRA.
+    peft_config = LoraConfig(**lora_kwargs)
+
+    # Build BitsAndBytesConfig for QLoRA 4-bit quantization.
     load_in_4bit = training_args.pop("load_in_4bit", False)
     bnb_quant_type = training_args.pop("bnb_4bit_quant_type", None)
     bnb_compute_dtype = training_args.pop("bnb_4bit_compute_dtype", None)
 
-    return LoraConfig(**lora_kwargs)
+    quantization_config = None
+    if load_in_4bit:
+        try:
+            import torch
+            from transformers import BitsAndBytesConfig  # type: ignore[import-untyped]
+            bnb_kwargs: dict[str, Any] = {"load_in_4bit": True}
+            if bnb_quant_type:
+                bnb_kwargs["bnb_4bit_quant_type"] = bnb_quant_type
+            if bnb_compute_dtype:
+                bnb_kwargs["bnb_4bit_compute_dtype"] = getattr(
+                    torch, bnb_compute_dtype, torch.bfloat16
+                )
+            quantization_config = BitsAndBytesConfig(**bnb_kwargs)
+        except ImportError:
+            print("WARNING: bitsandbytes not available, skipping 4-bit quantization.")
+
+    return peft_config, quantization_config
+
+
+def _load_model(model_name: str | None, quantization_config: Any = None):
+    """Load a model, optionally with QLoRA quantization.
+
+    When ``quantization_config`` is provided (QLoRA), the model must be
+    loaded explicitly with ``from_pretrained`` rather than letting TRL
+    handle it via the string model name, because TRL's string-based loading
+    doesn't support ``quantization_config``.
+    """
+    if model_name is None:
+        return None
+    if quantization_config is None:
+        # Let TRL handle model loading from the string name/path.
+        return model_name
+    # QLoRA: load the model with 4-bit quantization.
+    from transformers import AutoModelForCausalLM  # type: ignore[import-untyped]
+    return AutoModelForCausalLM.from_pretrained(
+        model_name,
+        quantization_config=quantization_config,
+        device_map="auto",
+    )
 
 
 def main() -> None:
@@ -132,65 +183,54 @@ def main() -> None:
     dataset_name = training_args.pop("dataset_name", None)
     reward_model_name = training_args.pop("reward_model", None)
     output_dir = training_args.get("output_dir", "/mnt/output")
+    dataset_split = training_args.pop("dataset_split", "train")
 
     # Load the dataset as a datasets.Dataset object.
-    # TRL trainers expect Dataset objects, not string paths.
-    dataset = _load_dataset(dataset_name)
+    dataset = _load_dataset(dataset_name, split=dataset_split)
 
-    # Extract PEFT/LoRA config if present (removes PEFT keys from training_args).
-    peft_config = _build_peft_config(training_args)
+    # Extract PEFT/LoRA + BNB quantization configs.
+    peft_config, quantization_config = _build_peft_config(training_args)
 
-    # Remaining training_args are all valid TrainingArguments fields.
+    # Load model (with QLoRA quantization if requested).
+    model = _load_model(model_name, quantization_config)
+
     # Dispatch to the appropriate TRL trainer.
     if command == "sft":
         from trl import SFTConfig, SFTTrainer  # type: ignore[import-untyped]
         config = SFTConfig(**training_args)
         trainer = SFTTrainer(
-            model=model_name,
-            args=config,
-            train_dataset=dataset,
-            peft_config=peft_config,
-            callbacks=callbacks,
+            model=model, args=config, train_dataset=dataset,
+            peft_config=peft_config, callbacks=callbacks,
         )
     elif command == "dpo":
         from trl import DPOConfig, DPOTrainer  # type: ignore[import-untyped]
         config = DPOConfig(**training_args)
         trainer = DPOTrainer(
-            model=model_name,
-            args=config,
-            train_dataset=dataset,
-            peft_config=peft_config,
-            callbacks=callbacks,
+            model=model, args=config, train_dataset=dataset,
+            peft_config=peft_config, callbacks=callbacks,
         )
     elif command == "ppo":
         from trl import PPOConfig, PPOTrainer  # type: ignore[import-untyped]
         config = PPOConfig(**training_args)
+        # PPOTrainer API varies across TRL versions.  In TRL >= 0.12,
+        # reward_model is passed to the constructor.
         trainer = PPOTrainer(
-            model=model_name,
-            args=config,
-            reward_model=reward_model_name,
-            train_dataset=dataset,
-            callbacks=callbacks,
+            model=model, args=config, train_dataset=dataset,
+            reward_model=reward_model_name, callbacks=callbacks,
         )
     elif command == "orpo":
         from trl import ORPOConfig, ORPOTrainer  # type: ignore[import-untyped]
         config = ORPOConfig(**training_args)
         trainer = ORPOTrainer(
-            model=model_name,
-            args=config,
-            train_dataset=dataset,
-            peft_config=peft_config,
-            callbacks=callbacks,
+            model=model, args=config, train_dataset=dataset,
+            peft_config=peft_config, callbacks=callbacks,
         )
     elif command == "kto":
         from trl import KTOConfig, KTOTrainer  # type: ignore[import-untyped]
         config = KTOConfig(**training_args)
         trainer = KTOTrainer(
-            model=model_name,
-            args=config,
-            train_dataset=dataset,
-            peft_config=peft_config,
-            callbacks=callbacks,
+            model=model, args=config, train_dataset=dataset,
+            peft_config=peft_config, callbacks=callbacks,
         )
     else:
         print(f"ERROR: Unknown TRL command: {command}")

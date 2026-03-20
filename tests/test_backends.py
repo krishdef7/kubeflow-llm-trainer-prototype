@@ -169,6 +169,41 @@ class TestTorchTuneBackend:
         assert "TorchTuneBackend" in repr_str
         assert "torchtune" in repr_str
 
+    def test_supported_methods_includes_full(self, backend):
+        """FULL fine-tuning must be in TorchTune's supported methods."""
+        assert FineTuningMethod.FULL in backend.supported_methods
+
+    def test_container_spec_lora_bool_value(self, backend):
+        """Bool LoRA config values should serialize as 'true'/'false'."""
+        config = LLMConfig(
+            model="test/model",
+            dataset="test/data",
+            method=FineTuningMethod.LORA,
+            lora_config={"r": 8, "apply_lora_to_mlp": True},
+        )
+        spec = backend.to_container_spec(config)
+        assert "apply_lora_to_mlp=true" in spec.args
+
+    def test_container_spec_lora_list_value(self, backend):
+        """List LoRA config values should serialize as OmegaConf list syntax."""
+        config = LLMConfig(
+            model="test/model",
+            dataset="test/data",
+            method=FineTuningMethod.LORA,
+            lora_config={"r": 8, "lora_attn_modules": ["q_proj", "v_proj"]},
+        )
+        spec = backend.to_container_spec(config)
+        assert "lora_attn_modules=[q_proj,v_proj]" in spec.args
+
+    def test_container_spec_learning_rate_override(self, backend):
+        """Learning rate should map to optimizer.lr= OmegaConf override."""
+        config = LLMConfig(
+            model="test/model", dataset="test/data",
+            learning_rate=1e-4,
+        )
+        spec = backend.to_container_spec(config)
+        assert "optimizer.lr=0.0001" in spec.args
+
 
 # =========================================================================
 # TRL Backend
@@ -310,6 +345,59 @@ class TestTRLBackend:
         assert args["desirable_weight"] == 2.0
         assert args["undesirable_weight"] == 0.5
 
+    def test_container_spec_orpo(self, backend):
+        """ORPO should produce correct TRL command and include orpo_alpha."""
+        config = LLMConfig(
+            model="test/model",
+            dataset="test/data",
+            method=FineTuningMethod.ORPO,
+            extra_args={"orpo_alpha": 0.5},
+        )
+        spec = backend.to_container_spec(config)
+        assert spec.args == ["orpo"]
+        args = json.loads(spec.env["TRL_TRAINING_ARGS"])
+        assert args["orpo_alpha"] == 0.5
+
+    def test_container_spec_orpo_default_alpha(self, backend):
+        """ORPO without explicit orpo_alpha should use default 0.1."""
+        config = LLMConfig(
+            model="test/model",
+            dataset="test/data",
+            method=FineTuningMethod.ORPO,
+        )
+        spec = backend.to_container_spec(config)
+        args = json.loads(spec.env["TRL_TRAINING_ARGS"])
+        assert args["orpo_alpha"] == 0.1
+
+    def test_container_spec_ppo_reward_model_value(self, backend):
+        """PPO reward_model should contain the exact value specified."""
+        config = LLMConfig(
+            model="test/model",
+            dataset="test/data",
+            method=FineTuningMethod.PPO,
+            extra_args={"reward_model": "OpenAssistant/reward-model-deberta-v3"},
+        )
+        spec = backend.to_container_spec(config)
+        args = json.loads(spec.env["TRL_TRAINING_ARGS"])
+        assert args["reward_model"] == "OpenAssistant/reward-model-deberta-v3"
+
+    def test_container_spec_lora_target_modules(self, backend):
+        """target_modules should map to lora_target_modules in args JSON."""
+        config = LLMConfig(
+            model="test/model",
+            dataset="test/data",
+            method=FineTuningMethod.SFT,
+            lora_config={"r": 16, "target_modules": ["q_proj", "v_proj"]},
+        )
+        spec = backend.to_container_spec(config)
+        args = json.loads(spec.env["TRL_TRAINING_ARGS"])
+        assert args["lora_target_modules"] == ["q_proj", "v_proj"]
+
+    def test_repr(self, backend):
+        repr_str = repr(backend)
+        assert "TRLBackend" in repr_str
+        assert "trl" in repr_str
+
 
 # =========================================================================
 # Unsloth Backend
@@ -413,3 +501,35 @@ class TestUnslothBackend:
         assert cfg["lora_r"] == 32
         assert cfg["lora_alpha"] == 64
         assert cfg["use_rslora"] is True
+
+    def test_validate_rejects_kto(self, backend, sft_config):
+        """Unsloth explicitly rejects KTO."""
+        sft_config.method = FineTuningMethod.KTO
+        with pytest.raises(ValueError, match="does not support KTO"):
+            backend.validate(sft_config)
+
+    def test_supported_methods_includes_orpo(self, backend):
+        """Unsloth supports ORPO — must be in supported_methods."""
+        assert FineTuningMethod.ORPO in backend.supported_methods
+
+    def test_container_spec_orpo(self, backend):
+        """ORPO should produce trainer_type='orpo'."""
+        config = LLMConfig(
+            model="test/model",
+            dataset="test/data",
+            method=FineTuningMethod.ORPO,
+        )
+        spec = backend.to_container_spec(config)
+        assert spec.env["UNSLOTH_TRAINER_TYPE"] == "orpo"
+
+    def test_container_spec_command_full(self, backend, sft_config):
+        """Full command assertion instead of substring check."""
+        spec = backend.to_container_spec(sft_config)
+        assert spec.command == [
+            "python", "-m", "kubeflow_llm_trainer.entrypoints.unsloth_runner"
+        ]
+
+    def test_repr(self, backend):
+        repr_str = repr(backend)
+        assert "UnslothBackend" in repr_str
+        assert "unsloth" in repr_str

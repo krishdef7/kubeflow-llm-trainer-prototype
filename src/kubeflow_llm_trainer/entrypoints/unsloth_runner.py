@@ -76,7 +76,14 @@ def main() -> None:
 
     # Load dataset.
     from datasets import load_dataset  # type: ignore[import-untyped]
-    dataset = load_dataset(config["dataset_name"], split="train")
+    dataset_split = config.get("dataset_split", "train")
+    try:
+        dataset = load_dataset(config["dataset_name"], split=dataset_split)
+    except (ValueError, KeyError):
+        ds = load_dataset(config["dataset_name"])
+        first_split = next(iter(ds))
+        print(f"Split {dataset_split!r} not found, using {first_split!r}.")
+        dataset = ds[first_split]
 
     # Select trainer based on type.
     from transformers import TrainingArguments  # type: ignore[import-untyped]

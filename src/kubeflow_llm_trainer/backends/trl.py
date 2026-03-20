@@ -228,6 +228,8 @@ class TRLBackend(LLMBackend):
             args["beta"] = config.extra_args.get("beta", 0.1)
         elif config.method == FineTuningMethod.PPO:
             args["reward_model"] = config.extra_args["reward_model"]
+        elif config.method == FineTuningMethod.ORPO:
+            args["orpo_alpha"] = config.extra_args.get("orpo_alpha", 0.1)
         elif config.method == FineTuningMethod.KTO:
             args["desirable_weight"] = config.extra_args.get(
                 "desirable_weight", 1.0

@@ -20,11 +20,12 @@ progress tracking), implemented in kubeflow/trainer#3227 by @robert-bell.
 The Kubeflow Trainer controller injects three environment variables into
 training pods via the ``trainjob-status`` plugin:
 
-* ``KUBEFLOW_TRAINER_STATUS_URL``     — HTTPS endpoint to POST updates to.
-* ``KUBEFLOW_TRAINER_STATUS_CA_CERT`` — PEM-encoded CA cert to trust the
-  controller's self-signed TLS.
-* ``KUBEFLOW_TRAINER_STATUS_TOKEN``   — Projected ServiceAccount JWT for
-  authenticating with the status server.
+* ``KUBEFLOW_TRAINER_SERVER_URL``     — HTTPS endpoint to POST updates to.
+* ``KUBEFLOW_TRAINER_SERVER_CA_CERT`` — **File path** to the PEM-encoded CA
+  cert (mounted from a ConfigMap) to trust the controller's self-signed TLS.
+* ``KUBEFLOW_TRAINER_SERVER_TOKEN``   — Projected ServiceAccount JWT for
+  authenticating with the status server.  The token audience encodes the
+  TrainJob namespace/name for authorization.
 
 This module provides:
 
@@ -36,6 +37,11 @@ This module provides:
    logging step.  This works with any HF Trainer-based framework: TRL's
    ``SFTTrainer``, ``DPOTrainer``, ``PPOTrainer``, etc., and Unsloth
    (which patches TRL's trainers).
+
+   Note: HuggingFace Transformers now ships an official ``KubeflowCallback``
+   (merged via huggingface/transformers#44487) that uses the same env vars.
+   Our callback is compatible and can coexist; it provides additional ETA
+   estimation not present in the upstream version.
 
 Integration with the Dynamic LLM Trainer Framework
 ---------------------------------------------------
@@ -57,7 +63,6 @@ import json
 import logging
 import os
 import ssl
-import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -68,9 +73,11 @@ logger = logging.getLogger(__name__)
 
 # Environment variables injected by the trainjob-status plugin.
 # Ref: kubeflow/trainer#3227 pkg/runtime/framework/plugins/trainjobstatus/
-ENV_STATUS_URL = "KUBEFLOW_TRAINER_STATUS_URL"
-ENV_STATUS_CA_CERT = "KUBEFLOW_TRAINER_STATUS_CA_CERT"
-ENV_STATUS_TOKEN = "KUBEFLOW_TRAINER_STATUS_TOKEN"
+# Names were finalized in the review by @astefanutti:
+# https://github.com/kubeflow/trainer/pull/3227#discussion_r2148925508
+ENV_STATUS_URL = "KUBEFLOW_TRAINER_SERVER_URL"
+ENV_STATUS_CA_CERT = "KUBEFLOW_TRAINER_SERVER_CA_CERT"
+ENV_STATUS_TOKEN = "KUBEFLOW_TRAINER_SERVER_TOKEN"
 
 
 def is_progress_reporting_available() -> bool:
@@ -218,33 +225,32 @@ class KubeflowProgressReporter:
     def _build_ssl_context(self) -> ssl.SSLContext | None:
         """Build an SSL context trusting the controller's CA cert.
 
-        If the CA cert is malformed or cannot be loaded, logs a warning and
-        returns ``None`` (falls back to system CA bundle).  Training must
-        not crash because of a controller-side certificate issue.
+        ``KUBEFLOW_TRAINER_SERVER_CA_CERT`` contains the **file path** to a
+        PEM-encoded CA certificate (mounted from a ConfigMap by the
+        trainjob-status plugin), NOT the inline PEM content.
+
+        Ref: robert-bell confirmed this in kubeflow/trainer#3227:
+        "The env var is the path to the file, not the inline PEM."
+        See also: kubeflow/sdk#368 for the reference implementation.
+
+        If the cert file is missing or malformed, logs a warning and returns
+        ``None`` (falls back to system CA bundle).  Training must not crash
+        because of a controller-side certificate issue.
         """
-        ca_cert_pem = os.environ.get(ENV_STATUS_CA_CERT, "")
-        if not ca_cert_pem:
+        ca_cert_path = os.environ.get(ENV_STATUS_CA_CERT, "")
+        if not ca_cert_path:
             return None
 
         ctx = ssl.create_default_context()
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".pem", delete=False, prefix="kubeflow_ca_"
-            ) as f:
-                f.write(ca_cert_pem)
-                ca_path = f.name
-
-            try:
-                ctx.load_verify_locations(ca_path)
-            finally:
-                os.unlink(ca_path)
-
+            ctx.load_verify_locations(ca_cert_path)
             return ctx
         except Exception:
             logger.warning(
-                "Failed to load Kubeflow CA certificate — falling back to "
-                "system CA bundle.  Progress reporting may fail if the "
-                "controller uses a self-signed cert.",
+                "Failed to load Kubeflow CA certificate from %s — falling "
+                "back to system CA bundle.  Progress reporting may fail if "
+                "the controller uses a self-signed cert.",
+                ca_cert_path,
                 exc_info=True,
             )
             return None
@@ -254,7 +260,18 @@ class KubeflowProgressReporter:
 # KubeflowTrainerCallback — HuggingFace Trainer integration
 # ---------------------------------------------------------------------------
 
-class KubeflowTrainerCallback:
+# Conditional import: inherit from TrainerCallback when transformers is
+# available (i.e. inside the training container where TRL/Unsloth run),
+# fall back to object for SDK-only installations.  HuggingFace's
+# CallbackHandler performs isinstance checks, so duck-typing alone is
+# insufficient — the callback would be silently ignored.
+try:
+    from transformers import TrainerCallback as _TrainerCallback
+except ImportError:
+    _TrainerCallback = object  # type: ignore[misc,assignment]
+
+
+class KubeflowTrainerCallback(_TrainerCallback):
     """HuggingFace Transformers ``TrainerCallback`` for Kubeflow progress.
 
     Automatically reports training progress and metrics to the Kubeflow
@@ -277,10 +294,9 @@ class KubeflowTrainerCallback:
 
     The callback is a no-op when running outside a Kubeflow TrainJob.
 
-    This implements the ``TrainerCallback`` interface from HuggingFace
-    Transformers.  We use duck-typing (matching the method signatures)
-    rather than inheriting from ``transformers.TrainerCallback`` to avoid
-    a hard dependency on the ``transformers`` package in the SDK.
+    Inherits from ``transformers.TrainerCallback`` when the ``transformers``
+    package is available (inside training containers).  Falls back to
+    ``object`` in SDK-only installations to avoid a hard dependency.
     """
 
     def __init__(self) -> None:
@@ -305,7 +321,7 @@ class KubeflowTrainerCallback:
         progress = min(progress, 100)
 
         # Estimate time remaining.
-        eta = ""
+        eta: str | None = None
         if self._start_time and current_step > 0 and max_steps > 0:
             elapsed = time.time() - self._start_time
             steps_remaining = max_steps - current_step
@@ -332,6 +348,15 @@ class KubeflowTrainerCallback:
         ))
 
     def on_train_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
-        """Called at the end of training — reports 100% completion."""
+        """Called at the end of training — reports 100% completion with final metrics."""
         if self._reporter.enabled:
-            self._reporter.report(TrainerStatus(progress=100))
+            # Include final metrics from the trainer's log_history if available.
+            metrics: list[Metric] = []
+            if state is not None:
+                log_history = getattr(state, "log_history", None)
+                if log_history and len(log_history) > 0:
+                    last_log = log_history[-1]
+                    for key, value in last_log.items():
+                        if isinstance(value, (int, float)) and key != "epoch":
+                            metrics.append(Metric(name=key, value=f"{value:.6g}"))
+            self._reporter.report(TrainerStatus(progress=100, metrics=metrics))

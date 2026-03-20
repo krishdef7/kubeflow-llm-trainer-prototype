@@ -116,6 +116,10 @@ class BackendRegistry:
             logger.debug("Registered LLM backend %r (class)", instance.name)
             return backend  # return the class unchanged (decorator pattern)
         elif isinstance(backend, LLMBackend):
+            if backend.name in cls._backends:
+                logger.info(
+                    "Overwriting existing LLM backend %r", backend.name
+                )
             cls._backends[backend.name] = backend
             logger.debug("Registered LLM backend %r (instance)", backend.name)
             return backend
@@ -211,7 +215,6 @@ class BackendRegistry:
     @classmethod
     def _load_entry_points(cls) -> None:
         """Discover and load backends from ``kubeflow.llm_backends`` entry points."""
-        cls._entry_points_loaded = True
         try:
             eps = importlib.metadata.entry_points()
             # Python 3.12+ returns a SelectableGroups; 3.10-3.11 returns a dict.
@@ -244,6 +247,11 @@ class BackendRegistry:
                 _ENTRY_POINT_GROUP,
                 exc_info=True,
             )
+        finally:
+            # Set the flag after the attempt (success or failure) to avoid
+            # retrying broken discovery on every get() call.  A failed
+            # discovery is permanent for this process — restart to retry.
+            cls._entry_points_loaded = True
 
     @classmethod
     def _reset(cls) -> None:
